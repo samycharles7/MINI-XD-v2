@@ -21,6 +21,7 @@ import { createCanvas, loadImage } from 'canvas';
 import { Sticker, createSticker, StickerTypes } from 'wa-sticker-formatter';
 import { translate } from 'google-translate-api-x';
 import yts from 'yt-search';
+import QRCode from 'qrcode';
 
 const logger = pino({ level: 'silent' });
 
@@ -251,7 +252,15 @@ async function startServer() {
 
             sock.ev.on('connection.update', async (update) => {
                 try {
-                    const { connection, lastDisconnect } = update;
+                    const { connection, lastDisconnect, qr } = update;
+
+                    if (qr && res && res.qr) {
+                        try {
+                            await res.qr(qr);
+                        } catch (e) {
+                            console.error('Error in QR callback:', e);
+                        }
+                    }
                     
                     if (connection === 'close') {
                         // Clear presence interval if it exists
@@ -555,6 +564,7 @@ async function startServer() {
 │     ⏣ .chatbot
 │     ⏣ .lang
 │     ⏣ .pair
+│     ⏣ .pairqr
 │     ⏣ .tuto
 ╰──────────────────╯
 
@@ -777,6 +787,46 @@ async function startServer() {
                         await connectToWhatsApp(phoneNumber, mockRes);
                     } catch (e) {
                         await sendSimple(t('❌ Erreur lors de la génération du code.', '❌ Error generating the code.'));
+                    }
+                }
+
+                if (command === '.pairqr' || command.startsWith('.pairqr ')) {
+                    const phoneNumber = q.replace(/[^0-9]/g, '');
+                    if (!phoneNumber) return await sendSimple(t('❌ Veuillez fournir un numéro de téléphone (ex: .pairqr 225...)', '❌ Please provide a phone number (ex: .pairqr 225...)'));
+                    
+                    await sock.sendMessage(from!, { react: { text: '⏳', key: msg.key } });
+                    await sendSimple(t('⏳ Génération du QR Code...', '⏳ Generating QR Code...'));
+
+                    const mockRes: any = {
+                        qr: async (qr: string) => {
+                            if (mockRes.headersSent) return;
+                            mockRes.headersSent = true;
+                            
+                            try {
+                                const qrBuffer = await QRCode.toBuffer(qr, { scale: 8 });
+                                await sock.sendMessage(from!, { 
+                                    image: qrBuffer, 
+                                    caption: `✨ *MINI XD QR PAIRING* ✨\n\n${t('Scannez ce QR code pour vous connecter.', 'Scan this QR code to connect.')}`
+                                }, { quoted: msg });
+                            } catch (err) {
+                                console.error('QR code generation failed:', err);
+                                await sendSimple(t('❌ Erreur lors de la génération du QR Code.', '❌ Error generating the QR Code.'));
+                            }
+                        },
+                        headersSent: false
+                    };
+                    
+                    try {
+                        await connectToWhatsApp(phoneNumber, mockRes);
+                        // Timeout if no QR is received within 60 seconds
+                        setTimeout(() => {
+                            if (!mockRes.headersSent) {
+                                mockRes.headersSent = true;
+                                sendSimple(t('❌ Délai d\'attente du QR Code dépassé.', '❌ QR Code timeout.')).catch(() => {});
+                            }
+                        }, 60000);
+                    } catch (e) {
+                        await sendSimple(t('❌ Erreur lors de la génération du QR Code.', '❌ Error generating the QR Code.'));
                     }
                 }
 
@@ -2338,6 +2388,10 @@ async function startServer() {
 
             if (res) {
                 if (!sock.authState.creds.registered) {
+                    if (res.qr) {
+                        console.log(`Waiting for QR code for ${cleanPhone}...`);
+                        return;
+                    }
                     console.log(`Requesting real pairing code from Baileys for ${cleanPhone}...`);
                     // Wait for socket to be ready to request code
                     await new Promise(resolve => setTimeout(resolve, 5000));
