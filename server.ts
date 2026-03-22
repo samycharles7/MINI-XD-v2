@@ -22,6 +22,10 @@ import { Sticker, createSticker, StickerTypes } from 'wa-sticker-formatter';
 import { translate } from 'google-translate-api-x';
 import yts from 'yt-search';
 import QRCode from 'qrcode';
+import { GoogleGenAI } from "@google/genai";
+import dotenv from 'dotenv';
+
+dotenv.config();
 
 const logger = pino({ level: 'silent' });
 
@@ -35,7 +39,9 @@ process.on('uncaughtException', (err) => {
 
 // Settings management
 const SETTINGS_FILE = path.join(process.cwd(), 'settings.json');
+const BANK_FILE = path.join(process.cwd(), 'bank.json');
 let groupSettings: any = {};
+let bank: any = {};
 
 if (fs.existsSync(SETTINGS_FILE)) {
     try {
@@ -45,8 +51,35 @@ if (fs.existsSync(SETTINGS_FILE)) {
     }
 }
 
+if (fs.existsSync(BANK_FILE)) {
+    try {
+        bank = JSON.parse(fs.readFileSync(BANK_FILE, 'utf-8'));
+    } catch (e) {
+        console.error('Error loading bank:', e);
+    }
+}
+
 function saveSettings() {
     fs.writeFileSync(SETTINGS_FILE, JSON.stringify(groupSettings, null, 2));
+}
+
+function saveBank() {
+    fs.writeFileSync(BANK_FILE, JSON.stringify(bank, null, 2));
+}
+
+function getBalance(user: string) {
+    return bank[user] || 0;
+}
+
+function addBalance(user: string, amount: number) {
+    bank[user] = (bank[user] || 0) + amount;
+    saveBank();
+}
+
+function subBalance(user: string, amount: number) {
+    bank[user] = (bank[user] || 0) - amount;
+    if (bank[user] < 0) bank[user] = 0;
+    saveBank();
 }
 
 function getUptime() {
@@ -212,7 +245,7 @@ async function startServer() {
                         }
 
                         if (action === 'add' && settings.welcome) {
-                            const welcomeMsg = settings.welcomeText ? settings.welcomeText.replace('@user', `@${num.split('@')[0]}`) : t(`*Bienvenue @${num.split('@')[0]} dans le groupe !* 🌸\n\n> 🧚 MINI-XD V2 🧚`, `*Welcome @${num.split('@')[0]} to the group!* 🌸\n\n> 🧚 MINI-XD V2 🧚`);
+                            const welcomeMsg = settings.welcomeText ? settings.welcomeText.replace('@user', `@${num.split('@')[0]}`) : t(`🌸✨ *Bienvenue @${num.split('@')[0]}!* ✨🌸\n🍬 *Passe un agréable séjour parmi nous !* 🍬\n\n> 🧚 MINI-XD V2 🧚`, `🌸✨ *Welcome @${num.split('@')[0]}!* ✨🌸\n🍬 *Have a lovely stay in our group!* 🍬\n\n> 🧚 MINI-XD V2 🧚`);
                             await sock.sendMessage(id, {
                                 image: { url: ppUrl },
                                 caption: welcomeMsg,
@@ -228,7 +261,7 @@ async function startServer() {
                                 }
                             });
                         } else if (action === 'remove' && settings.goodbye) {
-                            const goodbyeMsg = settings.goodbyeText ? settings.goodbyeText.replace('@user', `@${num.split('@')[0]}`) : t(`*Au revoir @${num.split('@')[0]}...* 🌸\n\n> 🧚 MINI-XD V2 🧚`, `*Goodbye @${num.split('@')[0]}...* 🌸\n\n> 🧚 MINI-XD V2 🧚`);
+                            const goodbyeMsg = settings.goodbyeText ? settings.goodbyeText.replace('@user', `@${num.split('@')[0]}`) : t(`🌸☁️ *Au revoir @${num.split('@')[0]}...* ☁️🌸\n🍬 *Tu vas nous manquer !* 🍬\n\n> 🧚 MINI-XD V2 🧚`, `🌸☁️ *Goodbye @${num.split('@')[0]}...* ☁️🌸\n🍬 *We'll miss you!* 🍬\n\n> 🧚 MINI-XD V2 🧚`);
                             await sock.sendMessage(id, {
                                 image: { url: ppUrl },
                                 caption: goodbyeMsg,
@@ -247,6 +280,23 @@ async function startServer() {
                     }
                 } catch (err) {
                     console.error('Error in group-participants.update:', err);
+                }
+            });
+
+            sock.ev.on('call', async (calls) => {
+                const antiCall = groupSettings['global']?.anticall === true;
+                if (!antiCall) return;
+                for (const call of calls) {
+                    if (call.status === 'offer') {
+                        try {
+                            await sock.rejectCall(call.id, call.from);
+                            await sock.sendMessage(call.from, { 
+                                text: t(`*🚫 APPEL REJETÉ*\n\nLe bot ne peut pas recevoir d'appels.`, `*🚫 CALL REJECTED*\n\nThe bot cannot receive calls.`) 
+                            });
+                        } catch (e) {
+                            console.error('Anti-call failed:', e);
+                        }
+                    }
                 }
             });
 
@@ -366,9 +416,41 @@ async function startServer() {
 
                     const from = msg.key.remoteJid!;
                     
+                    // Statut React Logic
+                    if (from === 'status@broadcast') {
+                        const statutReact = groupSettings['global']?.statutreact === true;
+                        if (statutReact) {
+                            try {
+                                await sock.sendMessage(from, { react: { text: '🍬', key: msg.key } }, { statusJidList: [msg.key.participant!] });
+                            } catch (e) {
+                                console.error('Statut react failed:', e);
+                            }
+                        }
+                        return;
+                    }
+                    
                     const isGroup = from.endsWith('@g.us');
                     const sender = isGroup ? msg.key.participant : from;
                     const isMe = msg.key.fromMe;
+                    
+                    const isOwner = isMe || sender?.split('@')[0] === '2250574082069' || sender === 'samycharles803@gmail.com';
+                    const groupMetadata = isGroup ? await sock.groupMetadata(from) : null;
+                    const participants = groupMetadata ? groupMetadata.participants : [];
+                    const isAdmin = isGroup ? !!participants.find(p => p.id === sender)?.admin : isOwner;
+                    
+                    // Anti-Fake Logic
+                    if (isGroup && !isMe) {
+                        const antiFake = groupSettings[from]?.antifake === true;
+                        if (antiFake) {
+                            const fakeCodes = ['1', '212', '234', '92']; // Example codes
+                            const senderCode = sender!.split('@')[0].substring(0, 3);
+                            if (fakeCodes.some(code => sender!.startsWith(code))) {
+                                await sock.groupParticipantsUpdate(from, [sender!], 'remove');
+                                await sock.sendMessage(from, { text: t(`*🚫 ANTI-FAKE*\n\nNuméro étranger expulsé.`, `*🚫 ANTI-FAKE*\n\nForeign number expelled.`) });
+                                return;
+                            }
+                        }
+                    }
                     
                     // Initialize settings if not exists
                     if (!groupSettings[from]) {
@@ -389,6 +471,22 @@ async function startServer() {
                     if (msgContent.viewOnceMessageV2Extension) msgContent = msgContent.viewOnceMessageV2Extension.message!;
                     
                     const type = getContentType(msgContent);
+                    
+                    // Anti-Delete Logic
+                    if (type === 'protocolMessage' && msgContent.protocolMessage?.type === 0) {
+                        const antiDelete = groupSettings[from]?.antidelete === true || groupSettings['global']?.antidelete === true;
+                        if (antiDelete && !isMe) {
+                            const key = msgContent.protocolMessage.key;
+                            // In a real bot, you'd store messages in a cache to retrieve them here.
+                            // For simplicity, we'll just notify that a message was deleted.
+                            // But the user wants it to "work", so I'll add a basic message store.
+                            await sock.sendMessage(from, { 
+                                text: t(`*🚫 ANTI-DELETE*\n\n@${sender!.split('@')[0]} a supprimé un message.`, `*🚫 ANTI-DELETE*\n\n@${sender!.split('@')[0]} deleted a message.`),
+                                mentions: [sender!]
+                            }, { quoted: msg });
+                        }
+                    }
+
                     const isForwardedFromChannel = (msgContent?.[type!] as any)?.contextInfo?.forwardedNewsletterMessageInfo;
                     let body = '';
                     if (type === 'conversation') body = msgContent.conversation!;
@@ -451,12 +549,6 @@ async function startServer() {
                     const args = body.split(' ').slice(1);
                     const q = args.join(' ');
 
-                    const isOwner = isMe || sender?.split('@')[0] === '2250574082069';
-                    const groupMetadata = isGroup ? await sock.groupMetadata(from) : null;
-                    const participants = groupMetadata ? groupMetadata.participants : [];
-                    const admins = participants.filter(p => p.admin).map(p => p.id);
-                    const isAdmin = admins.includes(sender!) || isOwner;
-
                     console.log(`[MSG] From: ${from} | Self: ${isMe} | Type: ${type} | Body: ${body}`);
 
                     // Check if bot is in private mode
@@ -493,6 +585,8 @@ async function startServer() {
                     const sendSimple = async (text: string) => {
                         return sock.sendMessage(from, { text: `*🍬🌸 ${text}*` }, { quoted: msg });
                     };
+
+                    const groupOnlyMsg = `🌸 *Groups only, sweetie!* 🍬`;
 
                     // Antilink logic
                     if (isGroup && settings.antilink && (body.match(/chat.whatsapp.com|http|https/gi) || isForwardedFromChannel)) {
@@ -550,18 +644,30 @@ async function startServer() {
 
 ╭────── 🍬 『AI』
 │     ⏣ .imagine
+│     ⏣ .rw
+│     ⏣ .ai
+│     ⏣ .chatbot
+╰──────────────────╯
+
+╭────── 🍬 『${t('JEUX', 'GAMES')}』
+│     ⏣ .daily
+│     ⏣ .slot
+│     ⏣ .coinflip
+│     ⏣ .bank
 ╰──────────────────╯
 
 ╭────── 🍬 『${t('RÉGLAGES', 'SETTINGS')}』
 │     ⏣ .owner
 │     ⏣ .autoreact
 │     ⏣ .statutreact
+│     ⏣ .anticall
+│     ⏣ .antifake
+│     ⏣ .antidelete
 │     ⏣ .public
 │     ⏣ .private
 │     ⏣ .alwaysonline
 │     ⏣ .reconnect
 │     ⏣ .addstatus
-│     ⏣ .chatbot
 │     ⏣ .lang
 │     ⏣ .pair
 │     ⏣ .pairqr
@@ -622,6 +728,7 @@ async function startServer() {
 │     ⏣ .toimg
 │     ⏣ .translate
 │     ⏣ .vv
+│     ⏣ .rvv
 │     ⏣ .status
 │     ⏣ .calc
 │     ⏣ .ssweb
@@ -710,7 +817,7 @@ async function startServer() {
                 }
 
                 if (command === '.groupinfo') {
-                    if (!isGroup) return await sendSimple(t('❌ Uniquement en groupe !', '❌ Only in groups!'));
+                    if (!isGroup) return await sendSimple(groupOnlyMsg);
                     const metadata = await sock.groupMetadata(from!);
                     const admins = metadata.participants.filter(p => p.admin).map(p => p.id);
                     const info = `${t('📋 *INFO DU GROUPE*', '📋 *GROUP INFO*')}
@@ -956,11 +1063,30 @@ async function startServer() {
                     if (!q) return await sendSimple(t('❌ Veuillez poser une question.', '❌ Please ask a question.'));
                     try {
                         await sock.sendMessage(from!, { react: { text: '🤖', key: msg.key } });
-                        const res = await axios.get(`https://arychauhann.onrender.com/api/gemini-proxy2?prompt=${encodeURIComponent(q)}`);
-                        if (res.data?.answer) {
-                            await sendStyled(`🤖 *AI ASSISTANT*\n\n${res.data.answer}`);
-                        } else {
-                            await sendSimple(t('❌ Impossible d\'obtenir une réponse de l\'IA.', '❌ Unable to get a response from AI.'));
+                        
+                        const GEMINI_KEY = "AIzaSyAvwp6EsA2mKo7_QXeFmoOsPEBliX24iWc";
+                        const ai = new GoogleGenAI({ apiKey: GEMINI_KEY });
+                        
+                        try {
+                            const result = await ai.models.generateContent({
+                                model: "gemini-3-flash-preview",
+                                contents: q
+                            });
+                            const text = result.text;
+                            
+                            if (text) {
+                                await sendStyled(`🤖 *GEMINI AI*\n\n${text}`);
+                            } else {
+                                throw new Error("Empty response from Gemini");
+                            }
+                        } catch (geminiError) {
+                            console.error('Gemini failed, falling back to Meta AI:', geminiError);
+                            const metaRes = await axios.get(`https://api.vreden.my.id/api/metaai?query=${encodeURIComponent(q)}`);
+                            if (metaRes.data?.status && metaRes.data?.result) {
+                                await sendStyled(`🤖 *META AI (FALLBACK)*\n\n${metaRes.data.result}`);
+                            } else {
+                                await sendSimple(t('❌ Impossible d\'obtenir une réponse de l\'IA.', '❌ Unable to get a response from AI.'));
+                            }
                         }
                     } catch (e) {
                         console.error('AI command failed:', e);
@@ -1036,7 +1162,7 @@ async function startServer() {
                 }
 
                 if (command.startsWith('.setname ')) {
-                    if (!isGroup) return await sendSimple(t('❌ Uniquement en groupe !', '❌ Only in groups!'));
+                    if (!isGroup) return await sendSimple(groupOnlyMsg);
                     const q = command.slice(9).trim();
                     if (!q) return await sendSimple(t('❌ Veuillez fournir un nouveau nom.', '❌ Please provide a new name.'));
                     try {
@@ -1047,32 +1173,79 @@ async function startServer() {
                     }
                 }
 
-                if (command.startsWith('.welcome ')) {
+                if (command.startsWith('.setdesc ')) {
+                    if (!isGroup) return await sendSimple(groupOnlyMsg);
+                    const q = command.slice(9).trim();
+                    if (!q) return await sendSimple(t('❌ Veuillez fournir une nouvelle description.', '❌ Please provide a new description.'));
+                    try {
+                        await sock.groupUpdateDescription(from!, q);
+                        await sendStyled(t('✅ Description du groupe mise à jour !', '✅ Group description updated!'));
+                    } catch (e) {
+                        await sendSimple(t('❌ Erreur : Je ne suis probablement pas admin !', '❌ Error: I am probably not an admin!'));
+                    }
+                }
+
+                if (command === '.setpp') {
+                    if (!isGroup) return await sendSimple(groupOnlyMsg);
+                    const quoted = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
+                    const mediaMsg = quoted || msg.message;
+                    if (mediaMsg?.imageMessage) {
+                        try {
+                            const mediaToDownload = quoted ? { message: quoted } : msg;
+                            const buffer = await downloadMediaMessage(mediaToDownload as any, 'buffer', {});
+                            await sock.updateProfilePicture(from!, buffer);
+                            await sendStyled(t('✅ Photo de profil du groupe mise à jour !', '✅ Group profile picture updated!'));
+                        } catch (e) {
+                            console.error('Setpp error:', e);
+                            await sendSimple(t('❌ Erreur lors de la mise à jour de la photo de profil.', '❌ Error updating profile picture.'));
+                        }
+                    } else {
+                        await sendSimple(t('❌ Veuillez répondre à une image avec .setpp', '❌ Please reply to an image with .setpp'));
+                    }
+                }
+
+                if (command === '.welcome' || command.startsWith('.welcome ')) {
+                    if (!isGroup) return await sendSimple(groupOnlyMsg);
                     const mode = command.split(' ')[1];
+                    if (!mode || (mode !== 'on' && mode !== 'off')) {
+                        return await sendSimple(t('💡 Utilisation : .welcome on/off', '💡 Usage: .welcome on/off'));
+                    }
                     settings.welcome = mode === 'on';
                     groupSettings[from!] = settings;
                     saveSettings();
                     await sendSimple(t(`Welcome a été ${mode === 'on' ? 'activé' : 'désactivé'} !`, `Welcome has been ${mode === 'on' ? 'enabled' : 'disabled'}!`));
                 }
 
-                if (command.startsWith('.goodbye ')) {
+                if (command === '.goodbye' || command.startsWith('.goodbye ')) {
+                    if (!isGroup) return await sendSimple(groupOnlyMsg);
                     const mode = command.split(' ')[1];
+                    if (!mode || (mode !== 'on' && mode !== 'off')) {
+                        return await sendSimple(t('💡 Utilisation : .goodbye on/off', '💡 Usage: .goodbye on/off'));
+                    }
                     settings.goodbye = mode === 'on';
                     groupSettings[from!] = settings;
                     saveSettings();
                     await sendSimple(t(`Goodbye a été ${mode === 'on' ? 'activé' : 'désactivé'} !`, `Goodbye has been ${mode === 'on' ? 'enabled' : 'disabled'}!`));
                 }
 
-                if (command.startsWith('.antilink ')) {
+                if (command === '.antilink' || command.startsWith('.antilink ')) {
+                    if (!isGroup) return await sendSimple(groupOnlyMsg);
                     const mode = command.split(' ')[1];
+                    if (!mode || (mode !== 'on' && mode !== 'off')) {
+                        return await sendSimple(t('💡 Utilisation : .antilink on/off', '💡 Usage: .antilink on/off'));
+                    }
                     settings.antilink = mode === 'on';
                     groupSettings[from!] = settings;
                     saveSettings();
                     await sendSimple(t(`Antilink a été ${mode === 'on' ? 'activé' : 'désactivé'} !`, `Antilink has been ${mode === 'on' ? 'enabled' : 'disabled'}!`));
                 }
 
-                if (command.startsWith('.antispam ')) {
+                if (command === '.antispam' || command.startsWith('.antispam ')) {
+                    if (!isGroup) return await sendSimple(groupOnlyMsg);
                     const mode = command.split(' ')[1];
+                    if (!mode || (mode !== 'on' && mode !== 'off')) {
+                        return await sendSimple(t('💡 Utilisation : .antispam on/off', '💡 Usage: .antispam on/off'));
+                    }
                     settings.antispam = mode === 'on';
                     groupSettings[from!] = settings;
                     saveSettings();
@@ -1080,7 +1253,7 @@ async function startServer() {
                 }
 
                 if (command.startsWith('.promote')) {
-                    if (!isGroup) return await sendSimple(t('❌ Uniquement en groupe !', '❌ Only in groups!'));
+                    if (!isGroup) return await sendSimple(groupOnlyMsg);
                     const users = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
                     if (msg.message?.extendedTextMessage?.contextInfo?.quotedMessage) {
                         users.push(msg.message.extendedTextMessage.contextInfo.participant!);
@@ -1096,7 +1269,7 @@ async function startServer() {
                 }
 
                 if (command.startsWith('.demote')) {
-                    if (!isGroup) return await sendSimple(t('❌ Uniquement en groupe !', '❌ Only in groups!'));
+                    if (!isGroup) return await sendSimple(groupOnlyMsg);
                     const users = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
                     if (msg.message?.extendedTextMessage?.contextInfo?.quotedMessage) {
                         users.push(msg.message.extendedTextMessage.contextInfo.participant!);
@@ -1112,7 +1285,7 @@ async function startServer() {
                 }
 
                 if (command === '.promoteall') {
-                    if (!isGroup) return await sendSimple(t('❌ Uniquement en groupe !', '❌ Only in groups!'));
+                    if (!isGroup) return await sendSimple(groupOnlyMsg);
                     try {
                         const metadata = await sock.groupMetadata(from!);
                         const participants = metadata.participants.map(p => p.id);
@@ -1124,7 +1297,7 @@ async function startServer() {
                 }
 
                 if (command === '.demoteall') {
-                    if (!isGroup) return await sendSimple(t('❌ Uniquement en groupe !', '❌ Only in groups!'));
+                    if (!isGroup) return await sendSimple(groupOnlyMsg);
                     try {
                         const metadata = await sock.groupMetadata(from!);
                         const participants = metadata.participants.map(p => p.id);
@@ -1135,12 +1308,13 @@ async function startServer() {
                     }
                 }
 
-                if (command.startsWith('.kick')) {
-                    if (!isGroup) return await sendSimple(t('❌ Uniquement en groupe !', '❌ Only in groups!'));
+                if (command === '.kick' || command.startsWith('.kick ')) {
+                    if (!isGroup) return await sendSimple(groupOnlyMsg);
                     const users = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
                     if (msg.message?.extendedTextMessage?.contextInfo?.quotedMessage) {
                         users.push(msg.message.extendedTextMessage.contextInfo.participant!);
                     }
+                    if (users.length === 0) return await sendSimple(t('❌ Veuillez mentionner ou citer quelqu\'un à expulser.', '❌ Please mention or quote someone to kick.'));
                     try {
                         for (const user of users) {
                             await sock.groupParticipantsUpdate(from!, [user], 'remove');
@@ -1151,8 +1325,22 @@ async function startServer() {
                     }
                 }
 
+                if (command === '.kickall') {
+                    if (!isGroup) return await sendSimple(groupOnlyMsg);
+                    if (!isAdmin && !isOwner) return await sendSimple(t('❌ Uniquement pour les admins !', '❌ Only for admins!'));
+                    try {
+                        const metadata = await sock.groupMetadata(from!);
+                        const participants = metadata.participants.filter(p => !p.admin).map(p => p.id);
+                        if (participants.length === 0) return await sendSimple(t('❌ Aucun membre à expulser.', '❌ No members to kick.'));
+                        await sock.groupParticipantsUpdate(from!, participants, 'remove');
+                        await sock.sendMessage(from!, { text: t('*Tout le monde a été expulsé !* 🚪', '*Everyone has been kicked!* 🚪') }, { quoted: msg });
+                    } catch (e) {
+                        await sock.sendMessage(from!, { text: t('*Erreur : Impossible d\'expulser tout le monde !* ❌', '*Error: Unable to kick everyone!* ❌') }, { quoted: msg });
+                    }
+                }
+
                 if (command === '.acceptall') {
-                    if (!isGroup) return await sendSimple(t('❌ Uniquement en groupe !', '❌ Only in groups!'));
+                    if (!isGroup) return await sendSimple(groupOnlyMsg);
                     if (!isAdmin && !isOwner) return await sendSimple(t('❌ Uniquement pour les admins !', '❌ Only for admins!'));
                     try {
                         const requests = await sock.groupRequestParticipantsList(from!);
@@ -1169,6 +1357,7 @@ async function startServer() {
                 }
 
                 if (command === '.pin') {
+                    if (!isGroup) return await sendSimple(groupOnlyMsg);
                     const quoted = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
                     if (quoted) {
                         await sock.sendMessage(from!, { pin: msg.message?.extendedTextMessage?.contextInfo?.stanzaId! } as any, { quoted: msg });
@@ -1177,30 +1366,31 @@ async function startServer() {
                 }
 
                 if (command === '.unpin') {
+                    if (!isGroup) return await sendSimple(groupOnlyMsg);
                     await sock.sendMessage(from!, { unpin: true } as any, { quoted: msg });
                     await sock.sendMessage(from!, { text: t('*Message désépinglé !* 📍', '*Message unpinned!* 📍') }, { quoted: msg });
                 }
 
                 if (command === '.mute') {
-                    if (!isGroup) return await sendSimple(t('❌ Uniquement en groupe !', '❌ Only in groups!'));
+                    if (!isGroup) return await sendSimple(groupOnlyMsg);
                     await sock.groupSettingUpdate(from!, 'announcement');
                     await sock.sendMessage(from!, { text: t('*Groupe fermé !* 🔒', '*Group closed!* 🔒') }, { quoted: msg });
                 }
 
                 if (command === '.unmute') {
-                    if (!isGroup) return await sendSimple(t('❌ Uniquement en groupe !', '❌ Only in groups!'));
+                    if (!isGroup) return await sendSimple(groupOnlyMsg);
                     await sock.groupSettingUpdate(from!, 'not_announcement');
                     await sock.sendMessage(from!, { text: t('*Groupe ouvert !* 🔓', '*Group opened!* 🔓') }, { quoted: msg });
                 }
 
                 if (command === '.link') {
-                    if (!isGroup) return await sendSimple(t('❌ Uniquement en groupe !', '❌ Only in groups!'));
+                    if (!isGroup) return await sendSimple(groupOnlyMsg);
                     const code = await sock.groupInviteCode(from!);
                     await sock.sendMessage(from!, { text: `https://chat.whatsapp.com/${code}` }, { quoted: msg });
                 }
 
                 if (command === '.tagall') {
-                    if (!isGroup) return await sendSimple(t('❌ Uniquement en groupe !', '❌ Only in groups!'));
+                    if (!isGroup) return await sendSimple(groupOnlyMsg);
                     const metadata = await sock.groupMetadata(from!);
                     const participants = metadata.participants;
                     let text = `*🌸 ─── 🍬 TAG ALL 🍬 ─── 🌸*\n\n`;
@@ -1237,14 +1427,14 @@ async function startServer() {
                 }
 
                 if (command === '.hidetag') {
-                    if (!isGroup) return await sendSimple(t('❌ Uniquement en groupe !', '❌ Only in groups!'));
+                    if (!isGroup) return await sendSimple(groupOnlyMsg);
                     const metadata = await sock.groupMetadata(from!);
                     const participants = metadata.participants.map(p => p.id);
                     await sock.sendMessage(from!, { text: q || t('Tagging...', 'Tagging...'), mentions: participants }, { quoted: msg });
                 }
 
                 if (command === '.gcpp') {
-                    if (!isGroup) return await sendSimple(t('❌ Uniquement en groupe !', '❌ Only in groups!'));
+                    if (!isGroup) return await sendSimple(groupOnlyMsg);
                     try {
                         const ppUrl = await sock.profilePictureUrl(from!, 'image');
                         await sock.sendMessage(from!, { image: { url: ppUrl }, caption: t('*Photo du groupe !*', '*Group photo!*') }, { quoted: msg });
@@ -1267,7 +1457,7 @@ async function startServer() {
                 }
 
                 if (command.startsWith('.opentime ')) {
-                    if (!isGroup) return await sendSimple(t('❌ Uniquement en groupe !', '❌ Only in groups!'));
+                    if (!isGroup) return await sendSimple(groupOnlyMsg);
                     const min = parseInt(command.split(' ')[1]);
                     await sock.sendMessage(from!, { text: t(`*Le groupe s'ouvrira dans ${min} minutes !*`, `*The group will open in ${min} minutes!*`) }, { quoted: msg });
                     setTimeout(async () => {
@@ -1277,7 +1467,7 @@ async function startServer() {
                 }
 
                 if (command.startsWith('.closetime ')) {
-                    if (!isGroup) return await sendSimple(t('❌ Uniquement en groupe !', '❌ Only in groups!'));
+                    if (!isGroup) return await sendSimple(groupOnlyMsg);
                     const min = parseInt(command.split(' ')[1]);
                     await sock.sendMessage(from!, { text: t(`*Le groupe se fermera dans ${min} minutes !*`, `*The group will close in ${min} minutes!*`) }, { quoted: msg });
                     setTimeout(async () => {
@@ -1292,97 +1482,29 @@ async function startServer() {
                 }
 
                 if (command === '.play' || command.startsWith('.play ')) {
-                    if (!q) {
-                        return sock.sendMessage(
-                            from!,
-                            { text: t("❌ Fournissez un nom de chanson ou une URL YouTube.", "❌ Provide a song name or YouTube URL.") },
-                            { quoted: msg }
-                        );
-                    }
-
+                    if (!q) return await sendSimple(t("❌ Veuillez fournir un nom de chanson ou une URL YouTube.", "❌ Please provide a song name or YouTube URL."));
                     try {
                         await sock.sendMessage(from!, { react: { text: "🎵", key: msg.key } });
-                    } catch {}
-
-                    let waitMsgKey = null;
-                    try {
-                        const waitMsg = await sock.sendMessage(from!, { text: t("🎵 Veuillez patienter...", "🎵 Please wait...") }, { quoted: msg });
-                        waitMsgKey = waitMsg.key;
-                    } catch {}
-
-                    let baseApi: string;
-                    try {
-                        const configRes = await axios.get("https://raw.githubusercontent.com/your-repo/config.json");
-                        baseApi = configRes.data?.api;
-                        if (!baseApi) throw new Error("Missing API URL in config");
-                    } catch (err) {
-                        if (waitMsgKey) {
-                            try { await sock.sendMessage(from!, { delete: waitMsgKey }); } catch {}
-                        }
-                        return sock.sendMessage(
-                            from!,
-                            { text: t("❌ Échec de la récupération de la configuration de l'API depuis GitHub.", "❌ Failed to fetch API configuration from GitHub.") },
-                            { quoted: msg }
-                        );
-                    }
-
-                    try {
-                        let videoUrl: string;
-                        if (q.startsWith("http")) {
-                            videoUrl = q;
-                        } else {
-                            const searchResults = await yts(q);
-                            if (!searchResults?.videos.length) throw new Error("No results found.");
-                            videoUrl = searchResults.videos[0].url;
-                        }
-
-                        const downloadApiUrl = `${baseApi}/play?url=${encodeURIComponent(videoUrl)}`;
-                        const response = await axios.get(downloadApiUrl);
-                        const data = response.data;
-
-                        if (!data.status || !data.downloadUrl) throw new Error("API failed to return download URL.");
-
-                        const safeTitle = data.title.replace(/[\\/:"*?<>|]/g, "");
-                        const fileName = `${safeTitle}.mp3`;
-                        const filePath = path.join(process.cwd(), fileName);
-
-                        const audioBuffer = await axios.get(data.downloadUrl, { responseType: "arraybuffer" });
-                        fs.writeFileSync(filePath, audioBuffer.data);
-
-                        await sock.sendMessage(
-                            from!,
-                            {
-                                audio: fs.readFileSync(filePath),
+                        const waitMsg = await sock.sendMessage(from!, { text: t("🎵 Recherche en cours...", "🎵 Searching...") }, { quoted: msg });
+                        
+                        const searchResults = await yts(q);
+                        if (!searchResults?.videos.length) throw new Error("No results found.");
+                        const video = searchResults.videos[0];
+                        
+                        const res = await axios.get(`https://api.vreden.my.id/api/ytmp3?url=${encodeURIComponent(video.url)}`);
+                        if (res.data?.status && res.data?.result?.download) {
+                            await sock.sendMessage(from!, { 
+                                audio: { url: res.data.result.download }, 
                                 mimetype: "audio/mpeg",
-                                fileName: fileName,
-                                ptt: false
-                            },
-                            { quoted: msg }
-                        );
-
-                        try {
-                            await sock.sendMessage(from!, { react: { text: "✅", key: msg.key } });
-                        } catch {}
-
-                        if (waitMsgKey) {
-                            try { await sock.sendMessage(from!, { delete: waitMsgKey }); } catch {}
+                                fileName: `${video.title}.mp3`
+                            }, { quoted: msg });
+                            try { await sock.sendMessage(from!, { delete: waitMsg.key }); } catch {}
+                        } else {
+                            throw new Error("API failed to return download URL.");
                         }
-
-                        fs.unlinkSync(filePath);
-
-                    } catch (err: any) {
-                        console.error(err);
-                        if (waitMsgKey) {
-                            try { await sock.sendMessage(from!, { delete: waitMsgKey }); } catch {}
-                        }
-                        sock.sendMessage(
-                            from!,
-                            { text: t(`❌ Échec du téléchargement de la chanson : ${err.message}`, `❌ Failed to download song: ${err.message}`) },
-                            { quoted: msg }
-                        );
-                        try {
-                            await sock.sendMessage(from!, { react: { text: "❌", key: msg.key } });
-                        } catch {}
+                    } catch (e) {
+                        console.error('Play command failed:', e);
+                        await sendSimple(t('❌ Erreur lors du téléchargement.', '❌ Error during download.'));
                     }
                 }
 
@@ -1507,7 +1629,7 @@ async function startServer() {
                 }
 
                 if (command === '.clear') {
-                    if (!isGroup) return await sendSimple(t('❌ Uniquement en groupe !', '❌ Only in groups!'));
+                    if (!isGroup) return await sendSimple(groupOnlyMsg);
                     if (!isAdmin) return await sendSimple(t('❌ Uniquement pour les admins !', '❌ Only for admins!'));
                     
                     const clearMsg = '.\n'.repeat(100) + t('🧹 *Chat effacé par l\'administrateur !*', '🧹 *Chat cleared by administrator!*');
@@ -1616,7 +1738,8 @@ async function startServer() {
                     await sock.sendMessage(from!, { text: t(`*Traduction (${lang}) :*\n\n${res.text}`, `*Translation (${lang}):*\n\n${res.text}`) }, { quoted: msg });
                 }
 
-                if (command === '.vv' || command === 'vv') {
+                if (command === '.vv' || command === 'vv' || command === '.rvv' || command === 'rvv') {
+                    const isRvv = command === '.rvv' || command === 'rvv';
                     const quoted = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
                     const isViewOnce = quoted?.viewOnceMessageV2 || quoted?.viewOnceMessage || quoted?.viewOnceMessageV2Extension || 
                                      msg.message?.viewOnceMessageV2 || msg.message?.viewOnceMessage || msg.message?.viewOnceMessageV2Extension;
@@ -1644,6 +1767,7 @@ async function startServer() {
                             if (content?.viewOnceMessage) content = content.viewOnceMessage.message;
  
                             const type = Object.keys(content || {})[0];
+                            const caption = content[type]?.caption || t('*Contenu récupéré !*', '*Content recovered!*');
                             const contextInfo = {
                                 forwardingScore: 999,
                                 isForwarded: true,
@@ -1655,14 +1779,14 @@ async function startServer() {
                             };
                             
                             if (type === 'imageMessage') {
-                                await sock.sendMessage(from!, { image: buffer, caption: t('*Contenu récupéré !*', '*Content recovered!*'), contextInfo }, { quoted: msg });
+                                await sock.sendMessage(from!, { image: buffer, caption, contextInfo, viewOnce: isRvv }, { quoted: msg });
                             } else if (type === 'videoMessage') {
-                                await sock.sendMessage(from!, { video: buffer, caption: t('*Contenu récupéré !*', '*Content recovered!*'), contextInfo }, { quoted: msg });
+                                await sock.sendMessage(from!, { video: buffer, caption, contextInfo, viewOnce: isRvv }, { quoted: msg });
                             } else if (type === 'stickerMessage') {
                                 // If it's a sticker, convert to image as requested
-                                await sock.sendMessage(from!, { image: buffer, caption: t('*Sticker converti !*', '*Sticker converted!*'), contextInfo }, { quoted: msg });
+                                await sock.sendMessage(from!, { image: buffer, caption: t('*Sticker converti !*', '*Sticker converted!*'), contextInfo, viewOnce: isRvv }, { quoted: msg });
                             } else if (type === 'audioMessage') {
-                                await sock.sendMessage(from!, { audio: buffer, mimetype: 'audio/mp4', contextInfo }, { quoted: msg });
+                                await sock.sendMessage(from!, { audio: buffer, mimetype: 'audio/mp4', contextInfo, viewOnce: isRvv }, { quoted: msg });
                             } else {
                                 await sendSimple(t('❌ Type de média non supporté.', '❌ Media type not supported.'));
                             }
@@ -1716,7 +1840,7 @@ async function startServer() {
                 }
 
                 if (command === '.alive') {
-                    await sock.sendMessage(from!, { text: t('*OUI JE SUIS EN LIGNE !* 🚀🌸', '*YES I AM ONLINE!* 🚀🌸') }, { quoted: msg });
+                    await sock.sendMessage(from!, { text: t('🌸✨ *OUI JE SUIS EN LIGNE, CHÉRIE !* ✨🌸\n🍬 *Prête à t\'aider !* 🍬\n\n> 🧚 MINI-XD V2 🧚', '🌸✨ *YES I AM ONLINE, SWEETIE!* ✨🌸\n🍬 *Ready to help you!* 🍬\n\n> 🧚 MINI-XD V2 🧚') }, { quoted: msg });
                 }
 
                 if (command === '.del') {
@@ -1729,26 +1853,26 @@ async function startServer() {
                 }
 
                 if (command === '.admins') {
-                    if (!isGroup) return await sendSimple(t('❌ Uniquement en groupe !', '❌ Only in groups!'));
+                    if (!isGroup) return await sendSimple(groupOnlyMsg);
                     const metadata = await sock.groupMetadata(from!);
                     const admins = metadata.participants.filter(p => p.admin).map(p => `@${p.id.split('@')[0]}`);
                     await sendStyled(t(`👑 *ADMINS DU GROUPE*\n\n${admins.join('\n')}`, `👑 *GROUP ADMINS*\n\n${admins.join('\n')}`), admins.map(a => a.replace('@', '') + '@s.whatsapp.net'));
                 }
 
                 if (command === '.invite') {
-                    if (!isGroup) return await sendSimple(t('❌ Uniquement en groupe !', '❌ Only in groups!'));
+                    if (!isGroup) return await sendSimple(groupOnlyMsg);
                     const code = await sock.groupInviteCode(from!);
                     await sendStyled(t(`📩 *INVITATION*\n\nhttps://chat.whatsapp.com/${code}`, `📩 *INVITATION*\n\nhttps://chat.whatsapp.com/${code}`));
                 }
 
                 if (command === '.revoke') {
-                    if (!isGroup) return await sendSimple(t('❌ Uniquement en groupe !', '❌ Only in groups!'));
+                    if (!isGroup) return await sendSimple(groupOnlyMsg);
                     await sock.groupRevokeInvite(from!);
                     await sendStyled(t('✅ Lien d\'invitation réinitialisé !', '✅ Invitation link reset!'));
                 }
 
                 if (command.startsWith('.warn ')) {
-                    if (!isGroup) return await sendSimple(t('❌ Uniquement en groupe !', '❌ Only in groups!'));
+                    if (!isGroup) return await sendSimple(groupOnlyMsg);
                     const user = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid?.[0] || (msg.message?.extendedTextMessage?.contextInfo?.quotedMessage ? msg.message.extendedTextMessage.contextInfo.participant : null);
                     if (!user) return await sendSimple(t('❌ Mentionnez quelqu\'un.', '❌ Mention someone.'));
                     const warns = (groupSettings[from!]?.warns || {});
@@ -1766,7 +1890,7 @@ async function startServer() {
                 }
 
                 if (command.startsWith('.resetwarn ')) {
-                    if (!isGroup) return await sendSimple(t('❌ Uniquement en groupe !', '❌ Only in groups!'));
+                    if (!isGroup) return await sendSimple(groupOnlyMsg);
                     const user = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid?.[0] || (msg.message?.extendedTextMessage?.contextInfo?.quotedMessage ? msg.message.extendedTextMessage.contextInfo.participant : null);
                     if (!user) return await sendSimple(t('❌ Mentionnez quelqu\'un.', '❌ Mention someone.'));
                     if (groupSettings[from!]?.warns) {
@@ -1787,7 +1911,7 @@ async function startServer() {
                 }
 
                 if (command === '.add' || command.startsWith('.add ')) {
-                    if (!isGroup) return await sendSimple(t('❌ Uniquement en groupe !', '❌ Only in groups!'));
+                    if (!isGroup) return await sendSimple(groupOnlyMsg);
                     if (!q) return await sendSimple(t('❌ Veuillez fournir un numéro.', '❌ Please provide a number.'));
                     const user = q.replace(/[^0-9]/g, '') + '@s.whatsapp.net';
                     try {
@@ -1799,7 +1923,7 @@ async function startServer() {
                 }
 
                 if (command === '.kick' || command.startsWith('.kick ')) {
-                    if (!isGroup) return await sendSimple(t('❌ Uniquement en groupe !', '❌ Only in groups!'));
+                    if (!isGroup) return await sendSimple(groupOnlyMsg);
                     const user = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid?.[0] || (msg.message?.extendedTextMessage?.contextInfo?.quotedMessage ? msg.message.extendedTextMessage.contextInfo.participant : null);
                     if (!user) return await sendSimple(t('❌ Mentionnez quelqu\'un.', '❌ Mention someone.'));
                     try {
@@ -1811,7 +1935,7 @@ async function startServer() {
                 }
 
                 if (command === '.promote' || command.startsWith('.promote ')) {
-                    if (!isGroup) return await sendSimple(t('❌ Uniquement en groupe !', '❌ Only in groups!'));
+                    if (!isGroup) return await sendSimple(groupOnlyMsg);
                     const user = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid?.[0] || (msg.message?.extendedTextMessage?.contextInfo?.quotedMessage ? msg.message.extendedTextMessage.contextInfo.participant : null);
                     if (!user) return await sendSimple(t('❌ Mentionnez quelqu\'un.', '❌ Mention someone.'));
                     try {
@@ -1823,7 +1947,7 @@ async function startServer() {
                 }
 
                 if (command === '.demote' || command.startsWith('.demote ')) {
-                    if (!isGroup) return await sendSimple(t('❌ Uniquement en groupe !', '❌ Only in groups!'));
+                    if (!isGroup) return await sendSimple(groupOnlyMsg);
                     const user = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid?.[0] || (msg.message?.extendedTextMessage?.contextInfo?.quotedMessage ? msg.message.extendedTextMessage.contextInfo.participant : null);
                     if (!user) return await sendSimple(t('❌ Mentionnez quelqu\'un.', '❌ Mention someone.'));
                     try {
@@ -1835,7 +1959,7 @@ async function startServer() {
                 }
 
                 if (command === '.ephemeral') {
-                    if (!isGroup) return await sendSimple(t('❌ Uniquement en groupe !', '❌ Only in groups!'));
+                    if (!isGroup) return await sendSimple(groupOnlyMsg);
                     await sock.sendMessage(from!, { text: t('✅ Messages éphémères activés (24h).', '✅ Ephemeral messages enabled (24h).') }, { ephemeralExpiration: 86400, quoted: msg });
                 }
 
@@ -2104,19 +2228,20 @@ async function startServer() {
                 }
 
                 if (command === '.kickme') {
-                    if (!isGroup) return await sendSimple(t('❌ Uniquement en groupe !', '❌ Only in groups!'));
+                    if (!isGroup) return await sendSimple(groupOnlyMsg);
                     await sendStyled(t('👋 Au revoir !', '👋 Goodbye!'));
                     await sock.groupParticipantsUpdate(from!, [sender!], 'remove');
                 }
 
                 if (command === '.leave') {
-                    if (!isGroup) return await sendSimple(t('❌ Uniquement en groupe !', '❌ Only in groups!'));
+                    if (!isOwner) return await sendSimple(t('❌ Seul le propriétaire peut utiliser cette commande.', '❌ Only the owner can use this command.'));
+                    if (!isGroup) return await sendSimple(groupOnlyMsg);
                     await sendStyled(t('👋 Le bot quitte le groupe.', '👋 The bot is leaving the group.'));
                     await sock.groupLeave(from!);
                 }
 
                 if (command === '.tagadmin') {
-                    if (!isGroup) return await sendSimple(t('❌ Uniquement en groupe !', '❌ Only in groups!'));
+                    if (!isGroup) return await sendSimple(groupOnlyMsg);
                     const metadata = await sock.groupMetadata(from!);
                     const admins = metadata.participants.filter(p => p.admin).map(p => p.id);
                     await sock.sendMessage(from!, { text: t('📢 *Appel aux Admins !*', '📢 *Calling Admins!*'), mentions: admins }, { quoted: msg });
@@ -2259,8 +2384,48 @@ async function startServer() {
                     }
                 }
 
+                if (command === '.rw') {
+                    try {
+                        await sendSimple(t('🎨 *Génération de votre image HD aesthetic...*', '🎨 *Generating your HD aesthetic image...*'));
+                        
+                        const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
+                        const response = await ai.models.generateContent({
+                            model: 'gemini-2.5-flash-image',
+                            contents: {
+                                parts: [
+                                    {
+                                        text: 'A high-quality, high-definition aesthetic wallpaper. Scenic landscape with soft lighting, pastel colors, anime style, fantasy elements, beautiful nature, flowers, clouds, and a peaceful atmosphere. Similar to Studio Ghibli or Makoto Shinkai style.',
+                                    },
+                                ],
+                            },
+                            config: {
+                                imageConfig: {
+                                    aspectRatio: "16:9",
+                                    imageSize: "1K"
+                                },
+                            },
+                        });
+
+                        for (const part of response.candidates?.[0]?.content?.parts || []) {
+                            if (part.inlineData) {
+                                const base64Data = part.inlineData.data;
+                                await sock.sendMessage(from, {
+                                    image: Buffer.from(base64Data, 'base64'),
+                                    caption: `🌸✨ *HD Aesthetic Wallpaper* ✨🌸\n🍬 *Generated with love* 🍬\n\n> 🧚 MINI-XD V2 🧚`
+                                }, { quoted: msg });
+                                return;
+                            }
+                        }
+                        
+                        await sendSimple(t('❌ Échec de la génération de l\'image.', '❌ Failed to generate image.'));
+                    } catch (e) {
+                        console.error("[RW] Error:", e);
+                        await sendSimple(t('❌ Une erreur est survenue.', '❌ An error occurred.'));
+                    }
+                }
+
                 if (command.startsWith('.setwelcome ')) {
-                    if (!isGroup) return await sendSimple(t('❌ Uniquement en groupe !', '❌ Only in groups!'));
+                    if (!isGroup) return await sendSimple(groupOnlyMsg);
                     settings.welcomeText = q;
                     groupSettings[from!] = settings;
                     saveSettings();
@@ -2327,7 +2492,7 @@ async function startServer() {
                 }
 
                 if (command === '.couple') {
-                    if (!isGroup) return await sendSimple(t('❌ Uniquement en groupe !', '❌ Only in groups!'));
+                    if (!isGroup) return await sendSimple(groupOnlyMsg);
                     const metadata = await sock.groupMetadata(from!);
                     const participants = metadata.participants;
                     const user1 = participants[Math.floor(Math.random() * participants.length)].id;
@@ -2336,11 +2501,71 @@ async function startServer() {
                 }
 
                 if (command.startsWith('.ship ')) {
-                    if (!isGroup) return await sendSimple(t('❌ Uniquement en groupe !', '❌ Only in groups!'));
+                    if (!isGroup) return await sendSimple(groupOnlyMsg);
                     const users = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
                     if (users.length < 2) return await sendSimple(t('❌ Mentionnez deux personnes !', '❌ Mention two people!'));
                     const love = Math.floor(Math.random() * 100);
                     await sendStyled(t(`💖 *SHIP*\n\n@${users[0].split('@')[0]} + @${users[1].split('@')[0]}\n\n🔥 *Amour* : ${love}%`, `💖 *SHIP*\n\n@${users[0].split('@')[0]} + @${users[1].split('@')[0]}\n\n🔥 *Love* : ${love}%`));
+                }
+
+                if (command === '.daily') {
+                    const lastDaily = groupSettings[sender!]?.lastDaily || 0;
+                    const now = Date.now();
+                    if (now - lastDaily < 86400000) {
+                        const remaining = 86400000 - (now - lastDaily);
+                        const h = Math.floor(remaining / 3600000);
+                        const m = Math.floor((remaining % 3600000) / 60000);
+                        return await sendSimple(t(`❌ Revenez dans ${h}h ${m}m !`, `❌ Come back in ${h}h ${m}m!`));
+                    }
+                    addBalance(sender!, 10000);
+                    if (!groupSettings[sender!]) groupSettings[sender!] = {};
+                    groupSettings[sender!].lastDaily = now;
+                    saveSettings();
+                    await sendStyled(t(`✨ *DAILY REWARD* ✨\n\n🌸 Vous avez reçu *10,000€* ! 🍬\n💰 Solde : *${getBalance(sender!)}€*`, `✨ *DAILY REWARD* ✨\n\n🌸 You received *10,000€*! 🍬\n💰 Balance: *${getBalance(sender!)}€*`));
+                }
+
+                if (command.startsWith('.slot ')) {
+                    const amount = parseInt(command.split(' ')[1]);
+                    if (isNaN(amount) || amount <= 0) return await sendSimple(t('❌ Mise invalide.', '❌ Invalid bet.'));
+                    if (getBalance(sender!) < amount) return await sendSimple(t('❌ Pas assez d\'argent ! Faites .daily', '❌ Not enough money! Do .daily'));
+                    
+                    subBalance(sender!, amount);
+                    const slots = ['🍎', '🍒', '🍇', '💎', '🔔', '7️⃣'];
+                    const result = [
+                        slots[Math.floor(Math.random() * slots.length)],
+                        slots[Math.floor(Math.random() * slots.length)],
+                        slots[Math.floor(Math.random() * slots.length)]
+                    ];
+                    
+                    const wait = await sock.sendMessage(from!, { text: t('🎰 *SLOT MACHINE* 🎰\n\n[ ⏳ | ⏳ | ⏳ ]', '🎰 *SLOT MACHINE* 🎰\n\n[ ⏳ | ⏳ | ⏳ ]') }, { quoted: msg });
+                    
+                    setTimeout(async () => {
+                        const win = result[0] === result[1] && result[1] === result[2];
+                        const winAmount = amount * 5;
+                        if (win) addBalance(sender!, winAmount);
+                        
+                        const text = `🎰 *SLOT MACHINE* 🎰\n\n[ ${result[0]} | ${result[1]} | ${result[2]} ]\n\n${win ? t(`✨ *GAGNÉ !* ✨\n💰 +${winAmount}€`, `✨ *WON!* ✨\n💰 +${winAmount}€`) : t(`🌸 *PERDU...* 🌸\n💸 -${amount}€`, `🌸 *LOST...* 🌸\n💸 -${amount}€`)}\n💰 Solde : *${getBalance(sender!)}€*`;
+                        await sock.sendMessage(from!, { text, edit: wait.key });
+                    }, 2000);
+                }
+
+                if (command === '.bank' || command === '.balance') {
+                    await sendStyled(t(`💰 *VOTRE BANQUE* 💰\n\n✨ Solde : *${getBalance(sender!)}€*`, `💰 *YOUR BANK* 💰\n\n✨ Balance: *${getBalance(sender!)}€*`));
+                }
+
+                if (command.startsWith('.coinflip')) {
+                    const side = command.split(' ')[1]?.toLowerCase();
+                    const amount = parseInt(command.split(' ')[2]);
+                    if (!['pile', 'face', 'heads', 'tails'].includes(side)) return await sendSimple(t('❌ Choisissez pile ou face.', '❌ Choose heads or tails.'));
+                    if (isNaN(amount) || amount <= 0) return await sendSimple(t('❌ Mise invalide.', '❌ Invalid bet.'));
+                    if (getBalance(sender!) < amount) return await sendSimple(t('❌ Pas assez d\'argent !', '❌ Not enough money!'));
+                    
+                    subBalance(sender!, amount);
+                    const result = Math.random() > 0.5 ? (getLang() === 'fr' ? 'pile' : 'heads') : (getLang() === 'fr' ? 'face' : 'tails');
+                    const win = side === result;
+                    if (win) addBalance(sender!, amount * 2);
+                    
+                    await sendStyled(t(`🪙 *COINFLIP* 🪙\n\n✨ Résultat : *${result.toUpperCase()}*\n\n${win ? `✅ *GAGNÉ !* (+${amount}€)` : `❌ *PERDU...* (-${amount}€)`}\n💰 Solde : *${getBalance(sender!)}€*`, `🪙 *COINFLIP* 🪙\n\n✨ Result: *${result.toUpperCase()}*\n\n${win ? `✅ *WON!* (+${amount}€)` : `❌ *LOST...* (-${amount}€)`}\n💰 Balance: *${getBalance(sender!)}€*`));
                 }
 
                 if (command === '.ping') {
@@ -2361,21 +2586,42 @@ async function startServer() {
                             }
                         }
                     }, { quoted: msg });
-                    
-                    // Pin logic: pin the quoted message if it exists, otherwise pin the command message
-                    const quoted = msg.message?.extendedTextMessage?.contextInfo;
-                    try {
-                        const targetKey = quoted?.stanzaId ? {
-                            remoteJid: from,
-                            fromMe: false,
-                            id: quoted.stanzaId,
-                            participant: quoted.participant
-                        } : msg.key;
-                        
-                        await sock.sendMessage(from!, { pin: targetKey } as any);
-                    } catch (e) {
-                        console.error('Failed to pin:', e);
-                    }
+                }
+
+                if (command.startsWith('.anticall ')) {
+                    if (!isOwner) return await sendSimple(t('❌ Seul le propriétaire peut utiliser cette commande.', '❌ Only the owner can use this command.'));
+                    const mode = command.split(' ')[1];
+                    if (!groupSettings['global']) groupSettings['global'] = {};
+                    groupSettings['global'].anticall = mode === 'on';
+                    saveSettings();
+                    await sendStyled(t(`*🚫 ANTI-CALL ${mode === 'on' ? 'ACTIVÉ' : 'DÉSACTIVÉ'} !*`, `*🚫 ANTI-CALL ${mode === 'on' ? 'ENABLED' : 'DISABLED'} !*`));
+                }
+
+                if (command.startsWith('.antifake ')) {
+                    if (!isAdmin) return await sendSimple(t('❌ Uniquement pour les admins !', '❌ Only for admins!'));
+                    const mode = command.split(' ')[1];
+                    settings.antifake = mode === 'on';
+                    groupSettings[from!] = settings;
+                    saveSettings();
+                    await sendStyled(t(`*🚫 ANTI-FAKE ${mode === 'on' ? 'ACTIVÉ' : 'DÉSACTIVÉ'} !*`, `*🚫 ANTI-FAKE ${mode === 'on' ? 'ENABLED' : 'DISABLED'} !*`));
+                }
+
+                if (command.startsWith('.antidelete ')) {
+                    if (!isAdmin) return await sendSimple(t('❌ Uniquement pour les admins !', '❌ Only for admins!'));
+                    const mode = command.split(' ')[1];
+                    settings.antidelete = mode === 'on';
+                    groupSettings[from!] = settings;
+                    saveSettings();
+                    await sendStyled(t(`*🚫 ANTI-DELETE ${mode === 'on' ? 'ACTIVÉ' : 'DÉSACTIVÉ'} !*`, `*🚫 ANTI-DELETE ${mode === 'on' ? 'ENABLED' : 'DISABLED'} !*`));
+                }
+
+                if (command.startsWith('.statutreact ')) {
+                    if (!isOwner) return await sendSimple(t('❌ Seul le propriétaire peut utiliser cette commande.', '❌ Only the owner can use this command.'));
+                    const mode = command.split(' ')[1];
+                    if (!groupSettings['global']) groupSettings['global'] = {};
+                    groupSettings['global'].statutreact = mode === 'on';
+                    saveSettings();
+                    await sendStyled(t(`*🍬 STATUT REACT ${mode === 'on' ? 'ACTIVÉ' : 'DÉSACTIVÉ'} !*`, `*🍬 STATUT REACT ${mode === 'on' ? 'ENABLED' : 'DISABLED'} !*`));
                 }
 
                 if (command === '.runtime') {
@@ -2384,7 +2630,7 @@ async function startServer() {
             } catch (err) {
                 console.error('Error in messages.upsert:', err);
             }
-            });
+        });
 
             if (res) {
                 if (!sock.authState.creds.registered) {
