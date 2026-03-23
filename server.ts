@@ -91,7 +91,7 @@ function getUptime() {
 }
 
 function getLang() {
-    return groupSettings['global']?.language || 'fr';
+    return groupSettings['global']?.language || 'en';
 }
 
 function t(fr: string, en: string) {
@@ -128,8 +128,9 @@ async function startServer() {
 
     // API for global settings
     app.get('/api/settings', (req, res) => {
-        const lang = groupSettings['global']?.language || 'fr';
-        res.json({ language: lang });
+        const lang = groupSettings['global']?.language || 'en';
+        const alwaysOnline = groupSettings['global']?.alwaysOnline !== false;
+        res.json({ language: lang, alwaysOnline });
     });
 
     app.get('/api/status', (req, res) => {
@@ -142,15 +143,24 @@ async function startServer() {
     });
 
     app.post('/api/settings', (req, res) => {
-        const { language } = req.body;
+        const { language, alwaysOnline } = req.body;
+        
+        groupSettings['global'] = groupSettings['global'] || {};
+        
         if (language && ['fr', 'en'].includes(language)) {
-            groupSettings['global'] = groupSettings['global'] || {};
             groupSettings['global'].language = language;
-            saveSettings();
-            res.json({ success: true, language });
-        } else {
-            res.status(400).json({ error: 'Invalid language' });
         }
+        
+        if (typeof alwaysOnline === 'boolean') {
+            groupSettings['global'].alwaysOnline = alwaysOnline;
+        }
+        
+        saveSettings();
+        res.json({ 
+            success: true, 
+            language: groupSettings['global'].language, 
+            alwaysOnline: groupSettings['global'].alwaysOnline !== false 
+        });
     });
 
     // Store active pairing sessions
@@ -851,7 +861,7 @@ async function startServer() {
                     await sendStyled(`${t('⚙️ *RÉGLAGES*', '⚙️ *SETTINGS*')}\n\n🌸 .owner\n🌸 .autoreact\n🌸 .statutreact\n🌸 .lang [fr/en]\n🌸 .public\n🌸 .private\n🌸 .addstatus\n🌸 .chatbot`, [], true);
                 }
 
-                if (command.startsWith('.lang ')) {
+                if (command.startsWith('.lang ') || command.startsWith('lang ')) {
                     if (!isOwner) return await sendSimple(t('❌ Uniquement pour le propriétaire !', '❌ Only for the owner!'));
                     const lang = command.split(' ')[1].toLowerCase();
                     if (lang === 'fr' || lang === 'en') {
@@ -1158,7 +1168,7 @@ async function startServer() {
 
                 // Group Module
                 if (command === '.group' || command === 'group') {
-                    await sendStyled(`${t('👥 *COMMANDES DE GROUPE*', '👥 *GROUP COMMANDS*')}\n\n🌸 .welcome\n🌸 .goodbye\n🌸 .antilink\n🌸 .promote\n🌸 .demote\n🌸 .promoteall\n🌸 .demoteall\n🌸 .kick\n🌸 .kickall\n🌸 .mute / .unmute\n🌸 .link\n🌸 .tagall\n🌸 .hidetag\n🌸 .gcpp\n🌸 .setname\n🌸 .setpp\n🌸 .setdesc\n🌸 .opentime\n🌸 .closetime\n🌸 .pin / .unpin`);
+                    await sendStyled(`${t('👥 *COMMANDES DE GROUPE*', '👥 *GROUP COMMANDS*')}\n\n🌸 .welcome\n🌸 .goodbye\n🌸 .antilink\n🌸 .promote\n🌸 .demote\n🌸 .promoteall\n🌸 .demoteall\n🌸 .kick\n🌸 .kickall\n🌸 .mute / .unmute\n🌸 .link\n🌸 .tagall\n🌸 .hidetag\n🌸 .gcpp\n🌸 .setname\n🌸 .setpp\n🌸 .setdesc\n🌸 .opentime\n🌸 .closetime\n🌸 .pin / .unpin\n🌸 .accepteall`);
                 }
 
                 if (command.startsWith('.setname ')) {
@@ -1339,7 +1349,7 @@ async function startServer() {
                     }
                 }
 
-                if (command === '.acceptall') {
+                if (command === '.acceptall' || command === '.accepteall') {
                     if (!isGroup) return await sendSimple(groupOnlyMsg);
                     if (!isAdmin && !isOwner) return await sendSimple(t('❌ Uniquement pour les admins !', '❌ Only for admins!'));
                     try {
@@ -2455,7 +2465,7 @@ async function startServer() {
                     const isAlwaysOnline = groupSettings['global']?.alwaysOnline !== false;
                     const isPublic = groupSettings['global']?.public !== false;
                     const chatbot = groupSettings['global']?.chatbot === true;
-                    const lang = groupSettings['global']?.language || 'fr';
+                    const lang = groupSettings['global']?.language || 'en';
                     
                     const statusText = `*🌸 ─── 🍬 BOT STATUS 🍬 ─── 🌸*
 

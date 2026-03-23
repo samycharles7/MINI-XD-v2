@@ -1,1 +1,75 @@
 @import "tailwindcss";
+
+@theme {
+  --color-neon-red: #ff1a1a;
+  --color-dark-red: #8b0000;
+  --color-deep-black: #0a0a0a;
+  --color-panel-bg: #121212;
+  
+  --font-ops: "Space Grotesk", "Inter", sans-serif;
+  --font-mono: "JetBrains Mono", monospace;
+}
+
+@keyframes border-flow {
+  0% { background-position: 0% 50%; }
+  100% { background-position: 200% 50%; }
+}
+
+@keyframes pulse-red {
+  0%, 100% { box-shadow: 0 0 10px rgba(255, 26, 26, 0.2); }
+  50% { box-shadow: 0 0 20px rgba(255, 26, 26, 0.5); }
+}
+
+@keyframes scanline {
+  0% { transform: translateY(-100%); }
+  100% { transform: translateY(100%); }
+}
+
+@keyframes grid-scroll {
+  0% { background-position: 0 0; }
+  100% { background-position: 0 40px; }
+}
+
+.animate-grid-scroll {
+  animation: grid-scroll 4s linear infinite;
+}
+
+.bg-tech-grid {
+  background-image: 
+    linear-gradient(rgba(255, 26, 26, 0.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 26, 26, 0.03) 1px, transparent 1px);
+  background-size: 40px 40px;
+}
+
+.border-flow-effect {
+  position: relative;
+  background: var(--color-panel-bg);
+}
+
+.border-flow-effect::before {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  background: linear-gradient(90deg, transparent, var(--color-neon-red), transparent);
+  background-size: 200% 100%;
+  animation: border-flow 4s linear infinite;
+  z-index: -1;
+  border-radius: inherit;
+  opacity: 0.5;
+}
+
+.glow-red {
+  box-shadow: 0 0 15px rgba(255, 26, 26, 0.3);
+}
+
+.text-ops {
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+}
+
+.military-card {
+  background: rgba(18, 18, 18, 0.9);
+  border-left: 2px solid var(--color-neon-red);
+  border-right: 2px solid var(--color-neon-red);
+  backdrop-filter: blur(10px);
+}
